@@ -1,0 +1,91 @@
+import { unstable_getServerSession } from "next-auth"
+import { authOptions } from "../pages/api/auth/[...nextauth]"
+import User from "../database/models/user"
+import { v2 as cloudinary } from "cloudinary"
+import Post from "../database/models/post"
+
+cloudinary.config({
+  cloud_name: "socialmediatest",
+  api_key: "878422332151259",
+  api_secret: "bNE_L0R3idq-oeYskBNlO11OZPk"
+})
+
+const deleteUser = async (req, res) => {
+  try {
+    const session = await unstable_getServerSession(req, res, authOptions)
+
+    const [user, posts] = await Promise.all([
+      User.findOne({ _id: session._id }),
+      Post.find({ authorId: session._id }),
+    ])
+
+    let userImage = null
+    if (user.image.split("/")[1] !== "defaults") {
+      userImage = await cloudinary.uploader.destroy(user.image)
+    }
+
+    const postsRes =
+      posts.length > 0
+        ? await Promise.all(
+            posts.map(async (post) => {
+              const images = post.content.images
+              return images.length > 0
+                ? await Promise.all(
+                    images.map(async (image) => {
+                      if (image.split("/")[1] !== "defaults") {
+                        const response = await cloudinary.uploader.destroy(
+                          image
+                        )
+                        return response
+                      }
+                    })
+                  )
+                : []
+            })
+          )
+        : []
+
+    const postsCommented = await Post.find({
+      "comments.commenterId": session._id,
+    })
+
+    const removedUser = await User.deleteOne({ _id: session._id })
+    const removedPosts = await Post.deleteMany({ authorId: session._id })
+
+    const removedComments =
+      postsCommented.length > 0
+        ? await Promise.all(
+            postsCommented.map(async (post) => {
+              if (post.comments.length > 0) {
+                const filtered = post.comments.filter((comment) => {
+                  return comment.commenterId.toString() !== session._id
+                })
+
+                post.comments = [...filtered]
+                return await post.save()
+              }
+            })
+          )
+        : []
+
+    res.json({
+      success: true,
+      message: "Account deleted",
+      result: {
+        userAssets: userImage,
+        postsAssets: postsRes.flat(),
+        removedUser,
+        removedPosts,
+        removedComments,
+      },
+    })
+  } catch (error) {
+    console.error(error.message)
+    res.json({
+      success: false,
+      message: "There's something wrong",
+    })
+  }
+}
+
+export default deleteUser
